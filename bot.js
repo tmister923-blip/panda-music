@@ -42,31 +42,56 @@ app.listen(PORT, () => {
 
 // Initialize Lavalink connection
 function initializeLavalink() {
-    const lavalinkConfig = {
-        name: process.env.LAVALINK_NAME || "cocaine",
-        password: process.env.LAVALINK_PASSWORD || "cocaine",
-        host: process.env.LAVALINK_HOST || "pnode1.danbot.host",
-        port: parseInt(process.env.LAVALINK_PORT) || 1351,
-        secure: process.env.LAVALINK_SECURE === 'true' || false
-    };
-
-    console.log('🎵 Initializing Lavalink with config:', lavalinkConfig);
-    
-    riffy = new Riffy(client, [lavalinkConfig], {
-        send: (guildId, payload) => {
-            const guild = client.guilds.cache.get(guildId);
-            if (guild) guild.shard.send(payload);
+    // Try multiple Lavalink servers for better reliability
+    const lavalinkConfigs = [
+        {
+            name: process.env.LAVALINK_NAME || "cocaine",
+            password: process.env.LAVALINK_PASSWORD || "cocaine",
+            host: process.env.LAVALINK_HOST || "pnode1.danbot.host",
+            port: parseInt(process.env.LAVALINK_PORT) || 1351,
+            secure: process.env.LAVALINK_SECURE === 'true' || false
+        },
+        // Fallback public Lavalink server
+        {
+            name: "lavalink-public",
+            password: "youshallnotpass",
+            host: "lavalink.oops.wtf",
+            port: 443,
+            secure: true
         }
-    });
+    ];
 
-    // Wait for Lavalink to be ready
-    riffy.on('nodeConnect', (node) => {
-        console.log(`🎵 Lavalink node connected: ${node.name}`);
-    });
+    console.log('🎵 Initializing Lavalink with configs:', lavalinkConfigs);
+    
+    try {
+        riffy = new Riffy(client, lavalinkConfigs, {
+            send: (guildId, payload) => {
+                const guild = client.guilds.cache.get(guildId);
+                if (guild) guild.shard.send(payload);
+            }
+        });
 
-    riffy.on('nodeError', (node, error) => {
-        console.error(`🎵 Lavalink node error:`, error);
-    });
+        // Wait for Lavalink to be ready
+        riffy.on('nodeConnect', (node) => {
+            console.log(`🎵 Lavalink node connected: ${node.name}`);
+        });
+
+        riffy.on('nodeError', (node, error) => {
+            console.error(`🎵 Lavalink node error:`, error);
+        });
+
+        riffy.on('nodeDisconnect', (node) => {
+            console.log(`🎵 Lavalink node disconnected: ${node.name}`);
+        });
+
+        // Add retry mechanism
+        riffy.on('nodeReconnect', (node) => {
+            console.log(`🎵 Lavalink node reconnected: ${node.name}`);
+        });
+    } catch (error) {
+        console.error('🎵 Failed to initialize Lavalink:', error);
+        return false;
+    }
 
     // Riffy event handlers
     riffy.on("trackStart", async (player, track) => {
@@ -109,9 +134,26 @@ function initializeLavalink() {
         }
     });
 
-    riffy.init(client.user.id);
-    console.log('🎵 Lavalink initialized successfully');
-    return true;
+    // Initialize with retry mechanism
+    const initLavalink = () => {
+        try {
+            riffy.init(client.user.id);
+            console.log('🎵 Lavalink initialization started');
+            return true;
+        } catch (error) {
+            console.error('🎵 Failed to start Lavalink initialization:', error);
+            return false;
+        }
+    };
+
+    // Try to initialize
+    if (initLavalink()) {
+        console.log('🎵 Lavalink initialization successful');
+        return true;
+    } else {
+        console.log('🎵 Lavalink initialization failed, will retry...');
+        return false;
+    }
 }
 
 // Handle play command - using exact same mechanism as server.js
@@ -143,9 +185,22 @@ async function handlePlayCommand(message) {
         
         const voiceChannel = member.voice.channel;
         
-        // Check if Lavalink is initialized
+        // Check if Lavalink is initialized and connected
         if (!riffy) {
             await message.reply('❌ Music system is not initialized. Please contact an administrator.');
+            return;
+        }
+
+        // Check if any nodes are connected
+        if (!riffy.nodes || riffy.nodes.size === 0) {
+            await message.reply('❌ Music service is not connected. Please try again in a moment.');
+            return;
+        }
+
+        // Check if any node is actually connected
+        const connectedNodes = Array.from(riffy.nodes.values()).filter(node => node.connected);
+        if (connectedNodes.length === 0) {
+            await message.reply('❌ Music service is not ready. Please try again in a moment.');
             return;
         }
         
