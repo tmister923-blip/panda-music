@@ -42,33 +42,25 @@ app.listen(PORT, () => {
 
 // Initialize Lavalink connection
 function initializeLavalink() {
-    // Try multiple Lavalink servers for better reliability
-    const lavalinkConfigs = [
-        {
-            name: process.env.LAVALINK_NAME || "cocaine",
-            password: process.env.LAVALINK_PASSWORD || "cocaine",
-            host: process.env.LAVALINK_HOST || "pnode1.danbot.host",
-            port: parseInt(process.env.LAVALINK_PORT) || 1351,
-            secure: process.env.LAVALINK_SECURE === 'true' || false
-        },
-        // Fallback public Lavalink server
-        {
-            name: "lavalink-public",
-            password: "youshallnotpass",
-            host: "lavalink.oops.wtf",
-            port: 443,
-            secure: true
-        }
-    ];
+    // Use only the original Lavalink server
+    const lavalinkConfig = {
+        name: process.env.LAVALINK_NAME || "cocaine",
+        password: process.env.LAVALINK_PASSWORD || "cocaine",
+        host: process.env.LAVALINK_HOST || "pnode1.danbot.host",
+        port: parseInt(process.env.LAVALINK_PORT) || 1351,
+        secure: process.env.LAVALINK_SECURE === 'true' || false
+    };
 
-    console.log('🎵 Initializing Lavalink with configs:', lavalinkConfigs);
+    console.log('🎵 Initializing Lavalink with config:', lavalinkConfig);
     
     try {
-        riffy = new Riffy(client, lavalinkConfigs, {
-            send: (guildId, payload) => {
-                const guild = client.guilds.cache.get(guildId);
+        riffy = new Riffy(client, [lavalinkConfig], {
+            send: (payload) => {
+                const guild = client.guilds.cache.get(payload.d.guild_id);
                 if (guild) guild.shard.send(payload);
-            }
+            },
+            defaultSearchPlatform: "ytmsearch",
+            restVersion: "v4",
         });
 
         // Wait for Lavalink to be ready
