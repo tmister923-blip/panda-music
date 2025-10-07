@@ -59,6 +59,15 @@ function initializeLavalink() {
         }
     });
 
+    // Wait for Lavalink to be ready
+    riffy.on('nodeConnect', (node) => {
+        console.log(`🎵 Lavalink node connected: ${node.name}`);
+    });
+
+    riffy.on('nodeError', (node, error) => {
+        console.error(`🎵 Lavalink node error:`, error);
+    });
+
     // Riffy event handlers
     riffy.on("trackStart", async (player, track) => {
         console.log(`🎵 Now playing: ${track.info.title} by ${track.info.author}`);
@@ -105,86 +114,158 @@ function initializeLavalink() {
     return true;
 }
 
-// Handle play command
+// Handle play command - using exact same mechanism as server.js
 async function handlePlayCommand(message) {
-    const args = message.content.split(' ').slice(1);
-    const songQuery = args.join(' ');
-    
-    if (!songQuery) {
-        return message.reply('❌ Please provide a song name or YouTube link!\nExample: `!play lovely` or `!play https://youtube.com/watch?v=...`');
-    }
-
-    const user = message.author;
-    const guild = message.guild;
-    const guildId = guild.id;
-    const userId = user.id;
-
-    // Check if user is in a voice channel
-    const voiceChannel = guild.members.cache.get(userId)?.voice?.channel;
-    if (!voiceChannel) {
-        return message.reply('❌ You need to be in a voice channel to use this command!');
-    }
-
-    // Check if bot has permission to join and speak
-    const botMember = guild.members.cache.get(client.user.id);
-    if (!voiceChannel.permissionsFor(botMember).has(['Connect', 'Speak'])) {
-        return message.reply('❌ I don\'t have permission to join or speak in that voice channel!');
-    }
-
-    const initialResponse = await message.reply(`🔍 Searching for: **${songQuery}**...`);
-    
     try {
-        console.log(`🎵 Searching for: ${songQuery}`);
-        const searchResults = await riffy.resolve({
-            query: songQuery,
-            requester: { id: userId, username: user.username }
-        });
+        const user = message.author;
+        const guild = message.guild;
+        const guildId = guild.id;
+        const userId = user.id;
         
-        if (!searchResults || !searchResults.tracks || searchResults.tracks.length === 0) {
-            await initialResponse.edit('❌ No results found for your search.');
+        // Extract song query from message content
+        const content = message.content;
+        const trigger = content.split(' ')[0];
+        const songQuery = content.substring(trigger.length).trim();
+        
+        if (!songQuery) {
+            await message.reply('❌ Please provide a song name or YouTube link!');
             return;
         }
         
-        const track = searchResults.tracks[0];
-        console.log(`🎵 Found track: ${track.info.title} by ${track.info.author}`);
+        console.log(`🎵 Play command: "${songQuery}" by ${user.tag} in ${guild.name}`);
         
-        let player = riffy.players.get(guildId);
-        if (!player) {
-            console.log(`🎵 Creating new connection for guild: ${guildId}`);
-            player = riffy.createConnection({
-                guildId: guildId,
-                voiceChannel: voiceChannel.id,
-                textChannel: message.channel.id,
-                deaf: true
+        // Check if user is in a voice channel
+        const member = guild.members.cache.get(userId);
+        if (!member || !member.voice.channel) {
+            await message.reply('❌ You need to be in a voice channel to use this command!');
+            return;
+        }
+        
+        const voiceChannel = member.voice.channel;
+        
+        // Check if Lavalink is initialized
+        if (!riffy) {
+            await message.reply('❌ Music system is not initialized. Please contact an administrator.');
+            return;
+        }
+        
+        // Check if bot has permission to join the voice channel
+        const botMember = guild.members.cache.get(client.user.id);
+        if (!botMember) {
+            await message.reply('❌ Bot is not in this server.');
+            return;
+        }
+        
+        const permissions = voiceChannel.permissionsFor(botMember);
+        if (!permissions.has('Connect') || !permissions.has('Speak')) {
+            await message.reply('❌ Bot does not have permission to join or speak in this voice channel.');
+            return;
+        }
+        
+        // Send initial response
+        const initialResponse = await message.reply(`🔍 Searching for: **${songQuery}**...`);
+        
+        try {
+            // Search for the track using Lavalink (same as music player tab)
+            const searchResults = await riffy.resolve({
+                query: songQuery,
+                requester: { id: userId, username: user.username }
             });
-            console.log('🎵 Connection created successfully');
-        } else {
-            console.log('🎵 Using existing connection for guild:', guildId);
-        }
+            
+            if (!searchResults || !searchResults.tracks || searchResults.tracks.length === 0) {
+                await initialResponse.edit('❌ No results found for your search.');
+                return;
+            }
+            
+            const track = searchResults.tracks[0];
+            console.log(`🎵 Found track: ${track.info.title} by ${track.info.author}`);
+            
+            // Use the exact same logic as the /api/music/play endpoint
+            console.log(`🎵 Attempting to play track: ${track.info.title}`);
+            console.log(`🎵 User ${userId} in voice channel: ${voiceChannel.name} (${voiceChannel.id})`);
+            
+            // Get or create player using the correct Riffy method
+            let player = riffy.players.get(guildId);
+            if (!player) {
+                console.log('🎵 Creating new connection for guild:', guildId);
+                console.log('🎵 Voice channel ID:', voiceChannel.id);
+                
+                try {
+                    player = riffy.createConnection({
+                        guildId: guildId,
+                        voiceChannel: voiceChannel.id,
+                        textChannel: message.channel.id,
+                        deaf: true
+                    });
+                    console.log('🎵 Connection created successfully');
+                } catch (error) {
+                    console.error('🎵 Error creating connection:', error);
+                    await initialResponse.edit('❌ Failed to connect to voice channel.');
+                    return;
+                }
+            } else {
+                console.log('🎵 Using existing connection for guild:', guildId);
+            }
 
-        // Wait for connection to establish
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        
-        if (player.disconnectTimeout) {
-            clearTimeout(player.disconnectTimeout);
-            player.disconnectTimeout = null;
-            console.log('🎵 Cleared disconnect timeout - new track added');
+            // The createConnection method should handle the voice connection automatically
+            console.log('🎵 Connection should be established automatically by createConnection');
+            console.log('🎵 Player state before wait:', {
+                connected: player.connected,
+                voiceChannelId: player.voiceChannelId,
+                playing: player.playing,
+                paused: player.paused
+            });
+            
+            // Wait a moment for the connection to establish
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            console.log('🎵 Connection established, proceeding with playback');
+            console.log('🎵 Player state after wait:', {
+                connected: player.connected,
+                voiceChannelId: player.voiceChannelId,
+                playing: player.playing,
+                paused: player.paused
+            });
+            
+            try {
+                console.log('🎵 Using full track object from search...');
+                console.log('🎵 Track title:', track.info.title);
+                console.log('🎵 Track author:', track.info.author);
+                
+                console.log('🎵 Adding track to queue...');
+                
+                // Clear any existing disconnect timeout when adding a new track
+                if (player.disconnectTimeout) {
+                    clearTimeout(player.disconnectTimeout);
+                    player.disconnectTimeout = null;
+                    console.log('🎵 Cleared disconnect timeout - new track added');
+                }
+                
+                // Add the complete track object to queue
+                player.queue.add(track);
+                
+                // Play if not already playing
+                if (!player.playing && !player.paused) {
+                    await player.play();
+                    console.log('🎵 Track playback started successfully');
+                } else {
+                    console.log('🎵 Track added to queue, will play after current track');
+                }
+                
+                await initialResponse.edit(`🎵 **Now Playing:** ${track.info.title}\n👤 **Requested by:** ${user.username}\n🔊 **Channel:** ${voiceChannel.name}`);
+                
+            } catch (playError) {
+                console.error('🎵 Failed to play track:', playError);
+                await initialResponse.edit('❌ Failed to play the requested song.');
+            }
+            
+        } catch (error) {
+            console.error('🎵 Error in play command:', error);
+            await initialResponse.edit('❌ Failed to play the requested song.');
         }
-        
-        player.queue.add(track);
-        
-        if (!player.playing && !player.paused) {
-            await player.play();
-            console.log('🎵 Track playback started successfully');
-        } else {
-            console.log('🎵 Track added to queue, will play after current track');
-        }
-        
-        await initialResponse.edit(`🎵 **Now Playing:** ${track.info.title}\n👤 **Requested by:** ${user.username}\n🔊 **Channel:** ${voiceChannel.name}`);
         
     } catch (error) {
-        console.error('🎵 Error in play command:', error);
-        await initialResponse.edit('❌ Failed to play the requested song.');
+        console.error('Error handling play command:', error);
+        await message.reply('❌ An error occurred while trying to play music.');
     }
 }
 
@@ -270,12 +351,21 @@ async function handleQueueCommand(message) {
 }
 
 // Bot ready event
-client.once('ready', () => {
+client.once('ready', async () => {
     console.log(`🎵 ${client.user.tag} is online!`);
     console.log(`🎵 Bot is in ${client.guilds.cache.size} servers`);
     
     // Initialize Lavalink after bot is ready
     initializeLavalink();
+    
+    // Wait a bit for Lavalink to connect
+    setTimeout(() => {
+        if (riffy && riffy.nodes && riffy.nodes.size > 0) {
+            console.log('🎵 Lavalink is ready for music commands!');
+        } else {
+            console.log('🎵 Lavalink connection in progress...');
+        }
+    }, 5000);
 });
 
 // Message event handler
