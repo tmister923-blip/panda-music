@@ -44,10 +44,10 @@ app.listen(PORT, () => {
 function initializeLavalink() {
     // Use only the original Lavalink server
     const lavalinkConfig = {
-        name: process.env.LAVALINK_NAME || "youshallnotpass",
-        password: process.env.LAVALINK_PASSWORD || "youshallnotpass",
-        host: process.env.LAVALINK_HOST || "lavahatry4.techbyte.host",
-        port: parseInt(process.env.LAVALINK_PORT) || 3000,
+        name: process.env.LAVALINK_NAME || "cocaine",
+        password: process.env.LAVALINK_PASSWORD || "cocaine",
+        host: process.env.LAVALINK_HOST || "pnode1.danbot.host",
+        port: parseInt(process.env.LAVALINK_PORT) || 1351,
         secure: process.env.LAVALINK_SECURE === 'true' || false
     };
 
@@ -492,4 +492,5 @@ if (!token) {
 }
 
 client.login(token).catch(console.error);
+
 
