@@ -144,8 +144,8 @@ function initializeLavalink() {
     const lavalinkConfig = {
         name: process.env.LAVALINK_NAME || "cocaine",
         password: process.env.LAVALINK_PASSWORD || "cocaine",
-        host: process.env.LAVALINK_HOST || "nexus.voidhosting.vip",
-        port: parseInt(process.env.LAVALINK_PORT) || 6034,
+        host: process.env.LAVALINK_HOST || "pnode1.danbot.host",
+        port: parseInt(process.env.LAVALINK_PORT) || 1351,
         secure: process.env.LAVALINK_SECURE === 'true' || false
     };
 
@@ -244,20 +244,7 @@ function initializeLavalink() {
     if (initLavalink()) {
         console.log('🎵 Lavalink initialization successful');
         
-        // Set up periodic health check with initial delay
-        setTimeout(() => {
-            setInterval(() => {
-                if (riffy && riffy.nodes) {
-                    const connectedNodes = Array.from(riffy.nodes.values()).filter(n => n.connected);
-                    if (connectedNodes.length === 0) {
-                        console.log('🎵 Health check: No connected nodes, attempting reconnection...');
-                        scheduleReconnection();
-                    } else {
-                        console.log(`🎵 Health check: ${connectedNodes.length} nodes connected`);
-                    }
-                }
-            }, 60000); // Check every 60 seconds (less frequent)
-        }, 10000); // Wait 10 seconds before starting health checks
+        // Health check removed - let the bot handle disconnections naturally through event handlers
         
         return true;
     } else {
