@@ -16,6 +16,11 @@ const client = new Client({
 
 // Initialize Riffy
 let riffy;
+let reconnectAttempts = 0;
+let maxReconnectAttempts = 10;
+let reconnectInterval = 5000; // Start with 5 seconds
+let maxReconnectInterval = 60000; // Max 1 minute
+let reconnectTimeout;
 
 // Bot configuration
 const PREFIX = process.env.BOT_PREFIX || '!';
@@ -40,21 +45,122 @@ app.listen(PORT, () => {
     console.log(`🌐 Web server running on port ${PORT}`);
 });
 
+// Handle node errors with reconnection logic
+function handleNodeError(node, error) {
+    console.log(`🎵 Node ${node.name} error: ${error.message}`);
+    
+    // Check if we have any connected nodes
+    const connectedNodes = Array.from(riffy.nodes.values()).filter(n => n.connected);
+    
+    if (connectedNodes.length === 0) {
+        console.log('🎵 No connected nodes, attempting reconnection...');
+        scheduleReconnection();
+    }
+}
+
+// Handle node disconnection
+function handleNodeDisconnect(node) {
+    console.log(`🎵 Node ${node.name} disconnected`);
+    
+    // Check if we have any connected nodes
+    const connectedNodes = Array.from(riffy.nodes.values()).filter(n => n.connected);
+    
+    if (connectedNodes.length === 0) {
+        console.log('🎵 No connected nodes, attempting reconnection...');
+        scheduleReconnection();
+    }
+}
+
+// Handle successful reconnection
+function handleNodeReconnect(node) {
+    console.log(`🎵 Node ${node.name} reconnected successfully`);
+    reconnectAttempts = 0; // Reset attempts on successful connection
+    reconnectInterval = 5000; // Reset interval
+    if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+    }
+}
+
+// Schedule reconnection with exponential backoff
+function scheduleReconnection() {
+    if (reconnectAttempts >= maxReconnectAttempts) {
+        console.log('🎵 Max reconnection attempts reached, will continue trying every minute...');
+        reconnectAttempts = 0; // Reset but keep trying
+        reconnectInterval = 60000; // Try every minute
+    }
+    
+    if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+    }
+    
+    console.log(`🎵 Scheduling reconnection attempt ${reconnectAttempts + 1}/${maxReconnectAttempts} in ${reconnectInterval/1000} seconds...`);
+    
+    reconnectTimeout = setTimeout(() => {
+        reconnectAttempts++;
+        console.log(`🎵 Attempting reconnection ${reconnectAttempts}/${maxReconnectAttempts}...`);
+        
+        // Try to reconnect all nodes
+        if (riffy && riffy.nodes) {
+            riffy.nodes.forEach(node => {
+                if (!node.connected) {
+                    console.log(`🎵 Attempting to reconnect node: ${node.name}`);
+                    try {
+                        node.connect();
+                    } catch (error) {
+                        console.error(`🎵 Failed to reconnect node ${node.name}:`, error);
+                    }
+                }
+            });
+        }
+        
+        // Increase interval for next attempt (exponential backoff)
+        reconnectInterval = Math.min(reconnectInterval * 1.5, maxReconnectInterval);
+        
+        // Schedule next attempt if no nodes are connected
+        setTimeout(() => {
+            const connectedNodes = riffy ? Array.from(riffy.nodes.values()).filter(n => n.connected) : [];
+            if (connectedNodes.length === 0) {
+                console.log('🎵 Still no connected nodes, scheduling next attempt...');
+                scheduleReconnection();
+            }
+        }, 10000); // Check after 10 seconds
+        
+    }, reconnectInterval);
+}
+
 // Initialize Lavalink connection
 function initializeLavalink() {
-    // Use only the original Lavalink server
-    const lavalinkConfig = {
-        name: process.env.LAVALINK_NAME || "cocaine",
-        password: process.env.LAVALINK_PASSWORD || "cocaine",
-        host: process.env.LAVALINK_HOST || "pnode1.danbot.host",
-        port: parseInt(process.env.LAVALINK_PORT) || 1351,
-        secure: process.env.LAVALINK_SECURE === 'true' || false
-    };
+    // Multiple Lavalink nodes for redundancy
+    const lavalinkNodes = [
+        {
+            name: process.env.LAVALINK_NAME || "cocaine",
+            password: process.env.LAVALINK_PASSWORD || "cocaine",
+            host: process.env.LAVALINK_HOST || "pnode1.danbot.host",
+            port: parseInt(process.env.LAVALINK_PORT) || 1351,
+            secure: process.env.LAVALINK_SECURE === 'true' || false
+        },
+        // Fallback nodes (you can add more reliable public nodes)
+        {
+            name: "fallback1",
+            password: "youshallnotpass",
+            host: "lavalink.darrennathanael.com",
+            port: 443,
+            secure: true
+        },
+        {
+            name: "fallback2", 
+            password: "youshallnotpass",
+            host: "lavalink.darrennathanael.com",
+            port: 80,
+            secure: false
+        }
+    ];
 
-    console.log('🎵 Initializing Lavalink with config:', lavalinkConfig);
+    console.log('🎵 Initializing Lavalink with config:', lavalinkNodes);
     
     try {
-        riffy = new Riffy(client, [lavalinkConfig], {
+        riffy = new Riffy(client, lavalinkNodes, {
             send: (payload) => {
                 const guild = client.guilds.cache.get(payload.d.guild_id);
                 if (guild) guild.shard.send(payload);
@@ -71,15 +177,18 @@ function initializeLavalink() {
 
         riffy.on('nodeError', (node, error) => {
             console.error(`🎵 Lavalink node error:`, error);
+            handleNodeError(node, error);
         });
 
         riffy.on('nodeDisconnect', (node) => {
             console.log(`🎵 Lavalink node disconnected: ${node.name}`);
+            handleNodeDisconnect(node);
         });
 
         // Add retry mechanism
         riffy.on('nodeReconnect', (node) => {
             console.log(`🎵 Lavalink node reconnected: ${node.name}`);
+            handleNodeReconnect(node);
         });
     } catch (error) {
         console.error('🎵 Failed to initialize Lavalink:', error);
@@ -142,9 +251,24 @@ function initializeLavalink() {
     // Try to initialize
     if (initLavalink()) {
         console.log('🎵 Lavalink initialization successful');
+        
+        // Set up periodic health check
+        setInterval(() => {
+            if (riffy && riffy.nodes) {
+                const connectedNodes = Array.from(riffy.nodes.values()).filter(n => n.connected);
+                if (connectedNodes.length === 0) {
+                    console.log('🎵 Health check: No connected nodes, attempting reconnection...');
+                    scheduleReconnection();
+                } else {
+                    console.log(`🎵 Health check: ${connectedNodes.length} nodes connected`);
+                }
+            }
+        }, 30000); // Check every 30 seconds
+        
         return true;
     } else {
         console.log('🎵 Lavalink initialization failed, will retry...');
+        scheduleReconnection();
         return false;
     }
 }
@@ -200,8 +324,10 @@ async function handlePlayCommand(message) {
         });
         
         if (connectedNodes.length === 0) {
-            console.log('🎵 No connected nodes found, but continuing anyway...');
-            // Let's try to continue anyway since the node shows as connected in logs
+            console.log('🎵 No connected nodes found, attempting reconnection...');
+            scheduleReconnection();
+            await message.reply('❌ Music service is temporarily unavailable. Attempting to reconnect... Please try again in a moment.');
+            return;
         }
 
         console.log(`🎵 Found ${connectedNodes.length} connected nodes`);
@@ -407,20 +533,77 @@ async function handleQueueCommand(message) {
     message.reply(queueText);
 }
 
+// Handle status command
+async function handleStatusCommand(message) {
+    const guildId = message.guild.id;
+    const player = riffy ? riffy.players.get(guildId) : null;
+    
+    let statusText = '🤖 **Bot Status:** Online\n';
+    statusText += `🎵 **Music Service:** ${riffy ? 'Initialized' : 'Not initialized'}\n`;
+    
+    if (riffy && riffy.nodes) {
+        const connectedNodes = Array.from(riffy.nodes.values()).filter(n => n.connected);
+        statusText += `🔗 **Lavalink Nodes:** ${connectedNodes.length}/${riffy.nodes.size} connected\n`;
+        
+        if (connectedNodes.length > 0) {
+            statusText += `✅ **Music Ready:** Yes\n`;
+        } else {
+            statusText += `❌ **Music Ready:** No (attempting reconnection...)\n`;
+        }
+        
+        // Show node details
+        statusText += '\n**Node Status:**\n';
+        riffy.nodes.forEach((node, name) => {
+            const status = node.connected ? '🟢 Connected' : '🔴 Disconnected';
+            statusText += `• ${name}: ${status} (${node.host}:${node.port})\n`;
+        });
+    } else {
+        statusText += '❌ **Music Ready:** No (Lavalink not initialized)\n';
+    }
+    
+    if (player) {
+        statusText += `\n🎵 **Current Player:** ${player.playing ? 'Playing' : 'Stopped'}\n`;
+        if (player.currentTrack) {
+            statusText += `🎶 **Now Playing:** ${player.currentTrack.info.title}\n`;
+        }
+    } else {
+        statusText += '\n🎵 **Current Player:** None\n';
+    }
+    
+    statusText += `\n🔄 **Reconnection Attempts:** ${reconnectAttempts}/${maxReconnectAttempts}`;
+    
+    const statusEmbed = new EmbedBuilder()
+        .setTitle('🎵 Bot Status')
+        .setDescription(statusText)
+        .setColor(riffy && riffy.nodes && Array.from(riffy.nodes.values()).some(n => n.connected) ? '#00ff00' : '#ff0000')
+        .setTimestamp();
+    
+    message.reply({ embeds: [statusEmbed] });
+}
+
 // Bot ready event
 client.once('ready', async () => {
     console.log(`🎵 ${client.user.tag} is online!`);
     console.log(`🎵 Bot is in ${client.guilds.cache.size} servers`);
     
     // Initialize Lavalink after bot is ready
-    initializeLavalink();
+    const lavalinkInitialized = initializeLavalink();
     
     // Wait a bit for Lavalink to connect
     setTimeout(() => {
         if (riffy && riffy.nodes && riffy.nodes.size > 0) {
-            console.log('🎵 Lavalink is ready for music commands!');
+            const connectedNodes = Array.from(riffy.nodes.values()).filter(n => n.connected);
+            if (connectedNodes.length > 0) {
+                console.log('🎵 Lavalink is ready for music commands!');
+            } else {
+                console.log('🎵 Lavalink nodes initialized but not connected, attempting reconnection...');
+                scheduleReconnection();
+            }
         } else {
             console.log('🎵 Lavalink connection in progress...');
+            if (!lavalinkInitialized) {
+                console.log('🎵 Initial Lavalink setup failed, will keep trying...');
+            }
         }
     }, 5000);
 });
@@ -453,6 +636,9 @@ client.on('messageCreate', async (message) => {
             case 'queue':
                 await handleQueueCommand(message);
                 break;
+            case 'status':
+                await handleStatusCommand(message);
+                break;
             case 'help':
                 const helpEmbed = new EmbedBuilder()
                     .setTitle('🎵 Music Bot Commands')
@@ -463,6 +649,7 @@ client.on('messageCreate', async (message) => {
                         { name: `${PREFIX}skip`, value: 'Skip to next song', inline: false },
                         { name: `${PREFIX}pause`, value: 'Pause/Resume playback', inline: false },
                         { name: `${PREFIX}queue`, value: 'Show current queue', inline: false },
+                        { name: `${PREFIX}status`, value: 'Check bot and music service status', inline: false },
                         { name: `${PREFIX}help`, value: 'Show this help message', inline: false }
                     )
                     .setColor('#00ff00')
@@ -492,5 +679,3 @@ if (!token) {
 }
 
 client.login(token).catch(console.error);
-
-
