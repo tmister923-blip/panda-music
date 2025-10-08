@@ -144,8 +144,8 @@ function initializeLavalink() {
     const lavalinkConfig = {
         name: process.env.LAVALINK_NAME || "cocaine",
         password: process.env.LAVALINK_PASSWORD || "cocaine",
-        host: process.env.LAVALINK_HOST || "pnode1.danbot.host",
-        port: parseInt(process.env.LAVALINK_PORT) || 1351,
+        host: process.env.LAVALINK_HOST || "nexus.voidhosting.vip",
+        port: parseInt(process.env.LAVALINK_PORT) || 6034,
         secure: process.env.LAVALINK_SECURE === 'true' || false
     };
 
@@ -660,3 +660,4 @@ if (!token) {
 }
 
 client.login(token).catch(console.error);
+
