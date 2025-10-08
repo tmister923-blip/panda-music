@@ -17,9 +17,9 @@ const client = new Client({
 // Initialize Riffy
 let riffy;
 let reconnectAttempts = 0;
-let maxReconnectAttempts = 10;
-let reconnectInterval = 5000; // Start with 5 seconds
-let maxReconnectInterval = 60000; // Max 1 minute
+let maxReconnectAttempts = 5; // Reduced from 10
+let reconnectInterval = 15000; // Start with 15 seconds (increased from 5)
+let maxReconnectInterval = 300000; // Max 5 minutes (increased from 1 minute)
 let reconnectTimeout;
 
 // Bot configuration
@@ -84,14 +84,16 @@ function handleNodeReconnect(node) {
 
 // Schedule reconnection with exponential backoff
 function scheduleReconnection() {
-    if (reconnectAttempts >= maxReconnectAttempts) {
-        console.log('🎵 Max reconnection attempts reached, will continue trying every minute...');
-        reconnectAttempts = 0; // Reset but keep trying
-        reconnectInterval = 60000; // Try every minute
+    // Prevent multiple simultaneous reconnection attempts
+    if (reconnectTimeout) {
+        console.log('🎵 Reconnection already in progress, skipping...');
+        return;
     }
     
-    if (reconnectTimeout) {
-        clearTimeout(reconnectTimeout);
+    if (reconnectAttempts >= maxReconnectAttempts) {
+        console.log('🎵 Max reconnection attempts reached, will continue trying every 5 minutes...');
+        reconnectAttempts = 0; // Reset but keep trying
+        reconnectInterval = 300000; // Try every 5 minutes
     }
     
     console.log(`🎵 Scheduling reconnection attempt ${reconnectAttempts + 1}/${maxReconnectAttempts} in ${reconnectInterval/1000} seconds...`);
@@ -124,7 +126,7 @@ function scheduleReconnection() {
         }
         
         // Increase interval for next attempt (exponential backoff)
-        reconnectInterval = Math.min(reconnectInterval * 1.5, maxReconnectInterval);
+        reconnectInterval = Math.min(reconnectInterval * 2, maxReconnectInterval);
         
         // Schedule next attempt if no nodes are connected
         setTimeout(() => {
@@ -135,17 +137,20 @@ function scheduleReconnection() {
             }
         }, 10000); // Check after 10 seconds
         
+        // Clear the timeout after attempt
+        reconnectTimeout = null;
+        
     }, reconnectInterval);
 }
 
 // Initialize Lavalink connection
 function initializeLavalink() {
-    // Your original Lavalink server configuration
+    // Your Lavalink server configuration
     const lavalinkConfig = {
         name: process.env.LAVALINK_NAME || "cocaine",
         password: process.env.LAVALINK_PASSWORD || "cocaine",
-        host: process.env.LAVALINK_HOST || "pnode1.danbot.host",
-        port: parseInt(process.env.LAVALINK_PORT) || 1351,
+        host: process.env.LAVALINK_HOST || "nexus.voidhosting.vip",
+        port: parseInt(process.env.LAVALINK_PORT) || 6034,
         secure: process.env.LAVALINK_SECURE === 'true' || false
     };
 
@@ -310,10 +315,11 @@ async function handlePlayCommand(message) {
         const initialResponse = await message.reply(`🔍 Searching for: **${songQuery}**...`);
         
         try {
-            // Search for the track using Lavalink (same as music player tab)
+            // Search for the track using Lavalink
             const searchResults = await riffy.resolve({
                 query: songQuery,
-                requester: { id: userId, username: user.username }
+                requester: { id: userId, username: user.username },
+                source: "ytmsearch"
             });
             
             if (!searchResults || !searchResults.tracks || searchResults.tracks.length === 0) {
