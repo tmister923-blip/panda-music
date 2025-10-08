@@ -106,7 +106,16 @@ function scheduleReconnection() {
                 if (!node.connected) {
                     console.log(`🎵 Attempting to reconnect node: ${node.name}`);
                     try {
-                        node.connect();
+                        // Use the proper Riffy reconnection method
+                        if (typeof node.reconnect === 'function') {
+                            node.reconnect();
+                        } else if (typeof node.connect === 'function') {
+                            node.connect();
+                        } else {
+                            console.log(`🎵 Node ${node.name} doesn't support reconnection, will retry initialization`);
+                            // Reinitialize the entire Lavalink connection
+                            initializeLavalink();
+                        }
                     } catch (error) {
                         console.error(`🎵 Failed to reconnect node ${node.name}:`, error);
                     }
@@ -235,18 +244,20 @@ function initializeLavalink() {
     if (initLavalink()) {
         console.log('🎵 Lavalink initialization successful');
         
-        // Set up periodic health check
-        setInterval(() => {
-            if (riffy && riffy.nodes) {
-                const connectedNodes = Array.from(riffy.nodes.values()).filter(n => n.connected);
-                if (connectedNodes.length === 0) {
-                    console.log('🎵 Health check: No connected nodes, attempting reconnection...');
-                    scheduleReconnection();
-                } else {
-                    console.log(`🎵 Health check: ${connectedNodes.length} nodes connected`);
+        // Set up periodic health check with initial delay
+        setTimeout(() => {
+            setInterval(() => {
+                if (riffy && riffy.nodes) {
+                    const connectedNodes = Array.from(riffy.nodes.values()).filter(n => n.connected);
+                    if (connectedNodes.length === 0) {
+                        console.log('🎵 Health check: No connected nodes, attempting reconnection...');
+                        scheduleReconnection();
+                    } else {
+                        console.log(`🎵 Health check: ${connectedNodes.length} nodes connected`);
+                    }
                 }
-            }
-        }, 30000); // Check every 30 seconds
+            }, 60000); // Check every 60 seconds (less frequent)
+        }, 10000); // Wait 10 seconds before starting health checks
         
         return true;
     } else {
@@ -662,4 +673,3 @@ if (!token) {
 }
 
 client.login(token).catch(console.error);
-
