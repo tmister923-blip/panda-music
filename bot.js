@@ -131,36 +131,19 @@ function scheduleReconnection() {
 
 // Initialize Lavalink connection
 function initializeLavalink() {
-    // Multiple Lavalink nodes for redundancy
-    const lavalinkNodes = [
-        {
-            name: process.env.LAVALINK_NAME || "cocaine",
-            password: process.env.LAVALINK_PASSWORD || "cocaine",
-            host: process.env.LAVALINK_HOST || "pnode1.danbot.host",
-            port: parseInt(process.env.LAVALINK_PORT) || 1351,
-            secure: process.env.LAVALINK_SECURE === 'true' || false
-        },
-        // Fallback nodes (you can add more reliable public nodes)
-        {
-            name: "fallback1",
-            password: "youshallnotpass",
-            host: "lavalink.darrennathanael.com",
-            port: 443,
-            secure: true
-        },
-        {
-            name: "fallback2", 
-            password: "youshallnotpass",
-            host: "lavalink.darrennathanael.com",
-            port: 80,
-            secure: false
-        }
-    ];
+    // Your original Lavalink server configuration
+    const lavalinkConfig = {
+        name: process.env.LAVALINK_NAME || "cocaine",
+        password: process.env.LAVALINK_PASSWORD || "cocaine",
+        host: process.env.LAVALINK_HOST || "pnode1.danbot.host",
+        port: parseInt(process.env.LAVALINK_PORT) || 1351,
+        secure: process.env.LAVALINK_SECURE === 'true' || false
+    };
 
-    console.log('🎵 Initializing Lavalink with config:', lavalinkNodes);
+    console.log('🎵 Initializing Lavalink with config:', lavalinkConfig);
     
     try {
-        riffy = new Riffy(client, lavalinkNodes, {
+        riffy = new Riffy(client, [lavalinkConfig], {
             send: (payload) => {
                 const guild = client.guilds.cache.get(payload.d.guild_id);
                 if (guild) guild.shard.send(payload);
