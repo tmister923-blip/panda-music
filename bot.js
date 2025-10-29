@@ -1,648 +1,476 @@
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, PermissionsBitField } = require('discord.js');
+const { joinVoiceChannel } = require('@discordjs/voice');
 const { Riffy } = require('riffy');
-const express = require('express');
 require('dotenv').config();
+const http = require('http');
 
-// Create Discord client
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
         GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMembers
-    ]
+    ],
 });
 
-// Initialize Riffy
+// Riffy setup
 let riffy;
-let reconnectAttempts = 0;
-let maxReconnectAttempts = 5; // Reduced from 10
-let reconnectInterval = 15000; // Start with 15 seconds (increased from 5)
-let maxReconnectInterval = 300000; // Max 5 minutes (increased from 1 minute)
-let reconnectTimeout;
+const lavalinkConfig = {
+    name: process.env.LAVALINK_NAME || 'lavalink',
+    password: process.env.LAVALINK_PASSWORD,
+    host: process.env.LAVALINK_HOST,
+    port: Number(process.env.LAVALINK_PORT || 2333),
+    secure: process.env.LAVALINK_SECURE === 'true'
+};
 
-// Bot configuration
-const PREFIX = process.env.BOT_PREFIX || '!';
-const PORT = process.env.PORT || 3000;
-
-// Create Express app for Render
-const app = express();
-app.use(express.json());
-
-// Health check endpoint for Render
-app.get('/', (req, res) => {
-    res.json({ 
-        status: 'online', 
-        bot: client.user ? client.user.tag : 'Starting...',
-        uptime: process.uptime(),
-        guilds: client.guilds ? client.guilds.cache.size : 0
-    });
+riffy = new Riffy(client, [lavalinkConfig], {
+    send: (payload) => {
+        const guild = client.guilds.cache.get(payload.d.guild_id);
+        if (guild) guild.shard.send(payload);
+    },
+    defaultSearchPlatform: "ytsearch",
+    restVersion: "v4",
 });
 
-// Start web server
-app.listen(PORT, () => {
-    console.log(`🌐 Web server running on port ${PORT}`);
+// Riffy events
+riffy.on('nodeConnect', (node) => console.log(`Lavalink node connected: ${node.name}`));
+riffy.on('nodeError', (node, error) => console.log(`Lavalink node error: ${error.message}`));
+riffy.on('trackStart', async (player, track) => {
+    console.log(`Track started: ${track.info.title}`);
+    await updateMusicPanel(player);
+});
+riffy.on('trackEnd', async (player, track) => {
+    console.log(`Track ended: ${track.info.title}`);
+    await updateMusicPanel(player);
+    if (stayConnectedGuilds.get(player.guildId)) {
+        player.playing = false;
+        player.paused = false;
+        await updateMusicPanel(player);
+    }
+});
+riffy.on('queueEnd', async (player) => {
+    await updateMusicPanel(player);
+    if (stayConnectedGuilds.get(player.guildId)) {
+        player.playing = false;
+        player.paused = false;
+        await updateMusicPanel(player);
+    } else {
+        player.destroy();
+    }
 });
 
-// Handle node errors with reconnection logic
-function handleNodeError(node, error) {
-    console.log(`🎵 Node ${node.name} error: ${error.message}`);
-    
-    // Check if we have any connected nodes
-    const connectedNodes = Array.from(riffy.nodes.values()).filter(n => n.connected);
-    
-    if (connectedNodes.length === 0) {
-        console.log('🎵 No connected nodes, attempting reconnection...');
-        scheduleReconnection();
-    }
-}
+// Auto-reconnect configuration
+const AUTO_RECONNECT_CHANNEL_ID = '1430146373365272576';
+const RECONNECT_DELAY = 15000; // 15 seconds
 
-// Handle node disconnection
-function handleNodeDisconnect(node) {
-    console.log(`🎵 Node ${node.name} disconnected`);
-    
-    // Check if we have any connected nodes
-    const connectedNodes = Array.from(riffy.nodes.values()).filter(n => n.connected);
-    
-    if (connectedNodes.length === 0) {
-        console.log('🎵 No connected nodes, attempting reconnection...');
-        scheduleReconnection();
-    }
-}
+// Auto-reconnect functionality
+const autoReconnectToChannel = async (guildId, retries = 0) => {
+    try {
+        const guild = client.guilds.cache.get(guildId);
+        if (!guild) return;
 
-// Handle successful reconnection
-function handleNodeReconnect(node) {
-    console.log(`🎵 Node ${node.name} reconnected successfully`);
-    reconnectAttempts = 0; // Reset attempts on successful connection
-    reconnectInterval = 5000; // Reset interval
-    if (reconnectTimeout) {
-        clearTimeout(reconnectTimeout);
-        reconnectTimeout = null;
-    }
-}
+        const channel = guild.channels.cache.get(AUTO_RECONNECT_CHANNEL_ID);
+        if (!channel) return;
 
-// Schedule reconnection with exponential backoff
-function scheduleReconnection() {
-    // Prevent multiple simultaneous reconnection attempts
-    if (reconnectTimeout) {
-        console.log('🎵 Reconnection already in progress, skipping...');
+        // Check if bot is already in the channel
+        const botMember = guild.members.cache.get(client.user.id);
+        if (botMember?.voice?.channelId === AUTO_RECONNECT_CHANNEL_ID) {
+            return; // Already in the target channel
+        }
+
+        console.log(`Auto-reconnecting to channel ${AUTO_RECONNECT_CHANNEL_ID} in guild ${guildId} (attempt ${retries + 1})`);
+        
+        // Check if Lavalink nodes are available
+        const nodes = riffy.nodes.map(n => n);
+        const hasAvailableNode = nodes.length > 0 && nodes.some(node => node.connected);
+        if (!hasAvailableNode) {
+            console.log('Lavalink nodes not available yet');
+            // Retry after 5 seconds if we haven't tried too many times
+            if (retries < 5) {
+                setTimeout(() => autoReconnectToChannel(guildId, retries + 1), 5000);
+            }
+            return;
+        }
+        
+        // Create or get existing player
+        let player = riffy.players.get(guildId);
+        if (!player) {
+            player = riffy.createConnection({
+                guildId: guildId,
+                voiceChannel: AUTO_RECONNECT_CHANNEL_ID,
+                textChannel: AUTO_RECONNECT_CHANNEL_ID,
+                deaf: true
+            });
+            console.log('Successfully created connection to channel');
+        } else {
+            // Update existing player to reconnect to the channel
+            player.voiceChannel = AUTO_RECONNECT_CHANNEL_ID;
+            player.textChannel = AUTO_RECONNECT_CHANNEL_ID;
+            console.log('Updated existing player connection');
+        }
+
+        // Enable stay connected mode
+        stayConnectedGuilds.set(guildId, true);
+        
+    } catch (error) {
+        console.error('Auto-reconnect error:', error);
+        // Retry after delay if error occurred
+        if (retries < 3) {
+            setTimeout(() => autoReconnectToChannel(guildId, retries + 1), 5000);
+        }
+    }
+};
+
+// Track disconnections and schedule reconnects
+const scheduleReconnect = (guildId) => {
+    setTimeout(() => {
+        autoReconnectToChannel(guildId);
+    }, RECONNECT_DELAY);
+};
+
+// Processing flag to prevent spam
+let processing = new Map();
+const musicPanels = new Map();
+const guildChannelConfig = new Map();
+const stayConnectedGuilds = new Map();
+
+const formatDuration = (ms) => {
+    if (typeof ms !== 'number' || Number.isNaN(ms)) return '0:00';
+    const totalSeconds = Math.floor(ms / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    if (hours > 0) {
+        return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+    return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+};
+
+const buildMusicPanel = (player) => {
+    const current = player.current;
+    const queuePreview = player.queue.slice(0, 5);
+    const embed = new EmbedBuilder().setColor(0x5865f2).setTitle('Music Player');
+    if (current?.info) {
+        embed.setDescription(`**${current.info.title}**\n${current.info.author}\n\`${formatDuration(current.info.length)}\``);
+        if (current.info.artworkUrl || current.info.thumbnail) {
+            embed.setImage(current.info.artworkUrl || current.info.thumbnail);
+        }
+    } else {
+        embed.setDescription('Nothing is playing.');
+    }
+    embed.addFields(
+        { name: 'Status', value: player.paused ? 'Paused' : player.playing ? 'Playing' : 'Idle', inline: true },
+        { name: 'Volume', value: `${player.volume}%`, inline: true },
+        {
+            name: 'Queue',
+            value: queuePreview.length ? queuePreview.map((track, index) => `${index + 1}. ${track.info?.title ?? 'Unknown track'}`).join('\n') : 'Queue empty',
+            inline: false,
+        }
+    );
+    const controls = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('music_pause').setLabel('Pause').setStyle(ButtonStyle.Secondary).setDisabled(player.paused || !player.playing),
+        new ButtonBuilder().setCustomId('music_resume').setLabel('Resume').setStyle(ButtonStyle.Success).setDisabled(!player.paused),
+        new ButtonBuilder().setCustomId('music_skip').setLabel('Skip').setStyle(ButtonStyle.Primary).setDisabled(!player.playing),
+        new ButtonBuilder().setCustomId('music_leave').setLabel('Leave').setStyle(ButtonStyle.Danger)
+    );
+    return { embeds: [embed], components: [controls] };
+};
+
+const updateMusicPanel = async (player) => {
+    const channelId = player.textChannel;
+    if (!channelId) return;
+    const channel = client.channels.cache.get(channelId) || await client.channels.fetch(channelId).catch(() => null);
+    if (!channel) return;
+    const payload = buildMusicPanel(player);
+    const stored = musicPanels.get(player.guildId);
+    if (stored) {
+        const message = await channel.messages.fetch(stored.messageId).catch(() => null);
+        if (message) {
+            await message.edit(payload).catch(() => null);
+            return;
+        }
+        musicPanels.delete(player.guildId);
+    }
+    const sent = await channel.send(payload).catch(() => null);
+    if (sent) {
+        musicPanels.set(player.guildId, { channelId: channel.id, messageId: sent.id });
+        if (guildChannelConfig.get(player.guildId) === channel.id) {
+            sent.pin().catch(() => null);
+        }
+    }
+};
+
+const clearMusicPanel = async (guildId) => {
+    const stored = musicPanels.get(guildId);
+    if (!stored) return;
+    const channel = client.channels.cache.get(stored.channelId) || await client.channels.fetch(stored.channelId).catch(() => null);
+    if (channel) {
+        const message = await channel.messages.fetch(stored.messageId).catch(() => null);
+        if (message) {
+            await message.delete().catch(() => null);
+        }
+    }
+    musicPanels.delete(guildId);
+};
+
+const TOKEN = process.env.BOT_TOKEN;
+
+// Raw event for Lavalink
+client.on('raw', (d) => {
+    if (d.t === "VOICE_STATE_UPDATE" || d.t === "VOICE_SERVER_UPDATE") {
+        riffy.updateVoiceState(d);
+    }
+});
+
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isButton() || !interaction.guildId) return;
+    const player = riffy.players.get(interaction.guildId);
+    if (!player) {
+        await interaction.reply({ content: 'Nothing is playing.', ephemeral: true }).catch(() => null);
         return;
     }
-    
-    if (reconnectAttempts >= maxReconnectAttempts) {
-        console.log('🎵 Max reconnection attempts reached, will continue trying every 5 minutes...');
-        reconnectAttempts = 0; // Reset but keep trying
-        reconnectInterval = 300000; // Try every 5 minutes
+    await interaction.deferUpdate().catch(() => null);
+    if (interaction.customId === 'music_pause') {
+        if (!player.paused && player.playing) {
+            player.pause(true);
+        }
+    } else if (interaction.customId === 'music_resume') {
+        if (player.paused) {
+            player.pause(false);
+        }
+    } else if (interaction.customId === 'music_skip') {
+        if (player.playing || player.paused) {
+            player.stop();
+            if (player.queue.length > 0) {
+                player.play();
+            } else {
+                player.playing = false;
+            }
+        }
+    } else if (interaction.customId === 'music_leave') {
+        player.destroy();
+        await clearMusicPanel(interaction.guildId);
     }
+    await updateMusicPanel(player);
+});
+
+client.once('ready', async () => {
+    console.log(`Logged in as ${client.user.tag}!`);
+
+    // Init Riffy
+    riffy.init(client.user.id);
+    console.log('Riffy initialized');
     
-    console.log(`🎵 Scheduling reconnection attempt ${reconnectAttempts + 1}/${maxReconnectAttempts} in ${reconnectInterval/1000} seconds...`);
-    
-    reconnectTimeout = setTimeout(() => {
-        reconnectAttempts++;
-        console.log(`🎵 Attempting reconnection ${reconnectAttempts}/${maxReconnectAttempts}...`);
+    // Wait for Lavalink nodes to be available before auto-connecting
+    const checkNodesAndConnect = async () => {
+        const maxAttempts = 10;
+        let attempts = 0;
         
-        // Try to reconnect all nodes
-        if (riffy && riffy.nodes) {
-            riffy.nodes.forEach(node => {
-                if (!node.connected) {
-                    console.log(`🎵 Attempting to reconnect node: ${node.name}`);
-                    try {
-                        // Use the proper Riffy reconnection method
-                        if (typeof node.reconnect === 'function') {
-                            node.reconnect();
-                        } else if (typeof node.connect === 'function') {
-                            node.connect();
-                        } else {
-                            console.log(`🎵 Node ${node.name} doesn't support reconnection, will retry initialization`);
-                            // Reinitialize the entire Lavalink connection
-                            initializeLavalink();
-                        }
-                    } catch (error) {
-                        console.error(`🎵 Failed to reconnect node ${node.name}:`, error);
+        while (attempts < maxAttempts) {
+            // Check if any Riffy nodes are available
+            const nodes = riffy.nodes.map(n => n);
+            if (nodes.length > 0 && nodes[0].connected) {
+                console.log('Lavalink node is ready, connecting to channel...');
+                
+                // Auto-connect to the specified channel on startup
+                const guilds = client.guilds.cache;
+                for (const [guildId, guild] of guilds) {
+                    const channel = guild.channels.cache.get(AUTO_RECONNECT_CHANNEL_ID);
+                    if (channel) {
+                        console.log(`Found target channel in guild ${guildId}, connecting...`);
+                        await autoReconnectToChannel(guildId);
+                        break; // Only connect to the first guild that has the target channel
                     }
                 }
-            });
-        }
-        
-        // Increase interval for next attempt (exponential backoff)
-        reconnectInterval = Math.min(reconnectInterval * 2, maxReconnectInterval);
-        
-        // Schedule next attempt if no nodes are connected
-        setTimeout(() => {
-            const connectedNodes = riffy ? Array.from(riffy.nodes.values()).filter(n => n.connected) : [];
-            if (connectedNodes.length === 0) {
-                console.log('🎵 Still no connected nodes, scheduling next attempt...');
-                scheduleReconnection();
+                break;
             }
-        }, 10000); // Check after 10 seconds
-        
-        // Clear the timeout after attempt
-        reconnectTimeout = null;
-        
-    }, reconnectInterval);
-}
-
-// Initialize Lavalink connection
-function initializeLavalink() {
-    // Your Lavalink server configuration
-    const lavalinkConfig = {
-        name: process.env.LAVALINK_NAME || "cocaine",
-        password: process.env.LAVALINK_PASSWORD || "cocaine",
-        host: process.env.LAVALINK_HOST || "nexus.voidhosting.vip",
-        port: parseInt(process.env.LAVALINK_PORT) || 6034,
-        secure: process.env.LAVALINK_SECURE === 'true' || false
-    };
-
-    console.log('🎵 Initializing Lavalink with config:', lavalinkConfig);
-    
-    try {
-        riffy = new Riffy(client, [lavalinkConfig], {
-            send: (payload) => {
-                const guild = client.guilds.cache.get(payload.d.guild_id);
-                if (guild) guild.shard.send(payload);
-            },
-            defaultSearchPlatform: "ytmsearch",
-            restVersion: "v4",
-        });
-
-        // Wait for Lavalink to be ready
-        riffy.on('nodeConnect', (node) => {
-            console.log(`🎵 Lavalink node connected: ${node.name}`);
-            console.log(`🎵 Node connected status: ${node.connected}`);
-        });
-
-        riffy.on('nodeError', (node, error) => {
-            console.error(`🎵 Lavalink node error:`, error);
-            handleNodeError(node, error);
-        });
-
-        riffy.on('nodeDisconnect', (node) => {
-            console.log(`🎵 Lavalink node disconnected: ${node.name}`);
-            handleNodeDisconnect(node);
-        });
-
-        // Add retry mechanism
-        riffy.on('nodeReconnect', (node) => {
-            console.log(`🎵 Lavalink node reconnected: ${node.name}`);
-            handleNodeReconnect(node);
-        });
-    } catch (error) {
-        console.error('🎵 Failed to initialize Lavalink:', error);
-        return false;
-    }
-
-    // Riffy event handlers
-    riffy.on("trackStart", async (player, track) => {
-        console.log(`🎵 Now playing: ${track.info.title} by ${track.info.author}`);
-        
-        // Clear any existing disconnect timeout when a new track starts
-        if (player.disconnectTimeout) {
-            clearTimeout(player.disconnectTimeout);
-            player.disconnectTimeout = null;
-            console.log("🎵 Cleared disconnect timeout - music is playing");
+            
+            attempts++;
+            console.log(`Waiting for Lavalink nodes (attempt ${attempts}/${maxAttempts})...`);
+            await new Promise(resolve => setTimeout(resolve, 2000));
         }
-    });
-
-    riffy.on("queueEnd", async (player) => {
-        console.log("🎵 Queue ended - setting 5 minute timeout before disconnect");
-        // Set a timeout to disconnect after 5 minutes of inactivity
-        player.disconnectTimeout = setTimeout(() => {
-            console.log("🎵 Disconnecting due to inactivity");
-            player.destroy();
-        }, 300000); // 5 minutes in milliseconds
-    });
-
-    riffy.on("trackEnd", async (player, track) => {
-        console.log(`🎵 Track ended: ${track.info.title}`);
-    });
-
-    riffy.on("playerDestroy", async (player) => {
-        console.log(`🎵 Player destroyed for guild: ${player.guildId}`);
-    });
-
-    riffy.on("playerMove", async (player, oldChannel, newChannel) => {
-        console.log(`🎵 Player moved from ${oldChannel} to ${newChannel}`);
-    });
-
-    // Handle voice state updates
-    client.on("raw", (d) => {
-        if (d.t === "VOICE_STATE_UPDATE" || d.t === "VOICE_SERVER_UPDATE") {
-            console.log(`🎵 Voice event received: ${d.t}`);
-            riffy.updateVoiceState(d);
-        }
-    });
-
-    // Initialize with retry mechanism
-    const initLavalink = () => {
-        try {
-            riffy.init(client.user.id);
-            console.log('🎵 Lavalink initialization started');
-            return true;
-        } catch (error) {
-            console.error('🎵 Failed to start Lavalink initialization:', error);
-            return false;
+        
+        if (attempts >= maxAttempts) {
+            console.log('Failed to connect to Lavalink nodes within timeout period');
         }
     };
-
-    // Try to initialize
-    if (initLavalink()) {
-        console.log('🎵 Lavalink initialization successful');
-        
-        // Health check removed - let the bot handle disconnections naturally through event handlers
-        
-        return true;
-    } else {
-        console.log('🎵 Lavalink initialization failed, will retry...');
-        scheduleReconnection();
-        return false;
-    }
-}
-
-// Handle play command - using exact same mechanism as server.js
-async function handlePlayCommand(message) {
-    try {
-        const user = message.author;
-        const guild = message.guild;
-        const guildId = guild.id;
-        const userId = user.id;
-        
-        // Extract song query from message content
-        const content = message.content;
-        const trigger = content.split(' ')[0];
-        const songQuery = content.substring(trigger.length).trim();
-        
-        if (!songQuery) {
-            await message.reply('❌ Please provide a song name or YouTube link!');
-            return;
-        }
-        
-        console.log(`🎵 Play command: "${songQuery}" by ${user.tag} in ${guild.name}`);
-        
-        // Check if user is in a voice channel
-        const member = guild.members.cache.get(userId);
-        if (!member || !member.voice.channel) {
-            await message.reply('❌ You need to be in a voice channel to use this command!');
-            return;
-        }
-        
-        const voiceChannel = member.voice.channel;
-        
-        // Check if Lavalink is initialized and connected
-        if (!riffy) {
-            await message.reply('❌ Music system is not initialized. Please contact an administrator.');
-            return;
-        }
-
-        // Simple check - if riffy exists, assume it's working
-        // The connection status detection was causing false positives
-        console.log('🎵 Lavalink system ready, proceeding with music command');
-        
-        // Check if bot has permission to join the voice channel
-        const botMember = guild.members.cache.get(client.user.id);
-        if (!botMember) {
-            await message.reply('❌ Bot is not in this server.');
-            return;
-        }
-        
-        const permissions = voiceChannel.permissionsFor(botMember);
-        if (!permissions.has('Connect') || !permissions.has('Speak')) {
-            await message.reply('❌ Bot does not have permission to join or speak in this voice channel.');
-            return;
-        }
-        
-        // Send initial response
-        const initialResponse = await message.reply(`🔍 Searching for: **${songQuery}**...`);
-        
-        try {
-            // Search for the track using Lavalink
-            const searchResults = await riffy.resolve({
-                query: songQuery,
-                requester: { id: userId, username: user.username },
-                source: "ytmsearch"
-            });
-            
-            if (!searchResults || !searchResults.tracks || searchResults.tracks.length === 0) {
-                await initialResponse.edit('❌ No results found for your search.');
-                return;
-            }
-            
-            const track = searchResults.tracks[0];
-            console.log(`🎵 Found track: ${track.info.title} by ${track.info.author}`);
-            
-            // Use the exact same logic as the /api/music/play endpoint
-            console.log(`🎵 Attempting to play track: ${track.info.title}`);
-            console.log(`🎵 User ${userId} in voice channel: ${voiceChannel.name} (${voiceChannel.id})`);
-            
-            // Get or create player using the correct Riffy method
-            let player = riffy.players.get(guildId);
-            if (!player) {
-                console.log('🎵 Creating new connection for guild:', guildId);
-                console.log('🎵 Voice channel ID:', voiceChannel.id);
-                
-                try {
-                    player = riffy.createConnection({
-                        guildId: guildId,
-                        voiceChannel: voiceChannel.id,
-                        textChannel: message.channel.id,
-                        deaf: true
-                    });
-                    console.log('🎵 Connection created successfully');
-                } catch (error) {
-                    console.error('🎵 Error creating connection:', error);
-                    await initialResponse.edit('❌ Failed to connect to voice channel.');
-                    return;
-                }
-            } else {
-                console.log('🎵 Using existing connection for guild:', guildId);
-            }
-
-            // The createConnection method should handle the voice connection automatically
-            console.log('🎵 Connection should be established automatically by createConnection');
-            console.log('🎵 Player state before wait:', {
-                connected: player.connected,
-                voiceChannelId: player.voiceChannelId,
-                playing: player.playing,
-                paused: player.paused
-            });
-            
-            // Wait a moment for the connection to establish
-            await new Promise(resolve => setTimeout(resolve, 3000));
-            console.log('🎵 Connection established, proceeding with playback');
-            console.log('🎵 Player state after wait:', {
-                connected: player.connected,
-                voiceChannelId: player.voiceChannelId,
-                playing: player.playing,
-                paused: player.paused
-            });
-            
-            try {
-                console.log('🎵 Using full track object from search...');
-                console.log('🎵 Track title:', track.info.title);
-                console.log('🎵 Track author:', track.info.author);
-                
-                console.log('🎵 Adding track to queue...');
-                
-                // Clear any existing disconnect timeout when adding a new track
-                if (player.disconnectTimeout) {
-                    clearTimeout(player.disconnectTimeout);
-                    player.disconnectTimeout = null;
-                    console.log('🎵 Cleared disconnect timeout - new track added');
-                }
-                
-                // Add the complete track object to queue
-                player.queue.add(track);
-                
-                // Play if not already playing
-                if (!player.playing && !player.paused) {
-                    await player.play();
-                    console.log('🎵 Track playback started successfully');
-                } else {
-                    console.log('🎵 Track added to queue, will play after current track');
-                }
-                
-                await initialResponse.edit(`🎵 **Now Playing:** ${track.info.title}\n👤 **Requested by:** ${user.username}\n🔊 **Channel:** ${voiceChannel.name}`);
-                
-            } catch (playError) {
-                console.error('🎵 Failed to play track:', playError);
-                await initialResponse.edit('❌ Failed to play the requested song.');
-            }
-            
-        } catch (error) {
-            console.error('🎵 Error in play command:', error);
-            await initialResponse.edit('❌ Failed to play the requested song.');
-        }
-        
-    } catch (error) {
-        console.error('Error handling play command:', error);
-        await message.reply('❌ An error occurred while trying to play music.');
-    }
-}
-
-// Handle stop command
-async function handleStopCommand(message) {
-    const guildId = message.guild.id;
-    const player = riffy.players.get(guildId);
     
-    if (!player) {
-        return message.reply('❌ No music is currently playing!');
-    }
-    
-    player.stop();
-    player.destroy();
-    message.reply('⏹️ Stopped playback and cleared queue!');
-}
-
-// Handle skip command
-async function handleSkipCommand(message) {
-    const guildId = message.guild.id;
-    const player = riffy.players.get(guildId);
-    
-    if (!player || !player.playing) {
-        return message.reply('❌ No music is currently playing!');
-    }
-    
-    if (player.queue.length === 0) {
-        return message.reply('❌ No songs in queue to skip to!');
-    }
-    
-    player.skip();
-    message.reply('⏭️ Skipped to next track!');
-}
-
-// Handle pause command
-async function handlePauseCommand(message) {
-    const guildId = message.guild.id;
-    const player = riffy.players.get(guildId);
-    
-    if (!player || !player.playing) {
-        return message.reply('❌ No music is currently playing!');
-    }
-    
-    if (player.paused) {
-        player.pause(false);
-        message.reply('▶️ Resumed playback!');
-    } else {
-        player.pause(true);
-        message.reply('⏸️ Paused playback!');
-    }
-}
-
-// Handle queue command
-async function handleQueueCommand(message) {
-    const guildId = message.guild.id;
-    const player = riffy.players.get(guildId);
-    
-    if (!player || (!player.playing && player.queue.length === 0)) {
-        return message.reply('❌ No music queue found!');
-    }
-    
-    const queue = player.queue;
-    const currentTrack = player.currentTrack;
-    
-    let queueText = '';
-    
-    if (currentTrack) {
-        queueText += `🎵 **Now Playing:** ${currentTrack.info.title}\n`;
-    }
-    
-    if (queue.length > 0) {
-        queueText += `\n📋 **Queue (${queue.length} songs):**\n`;
-        queue.slice(0, 10).forEach((track, index) => {
-            queueText += `${index + 1}. ${track.info.title}\n`;
-        });
-        
-        if (queue.length > 10) {
-            queueText += `... and ${queue.length - 10} more songs`;
-        }
-    }
-    
-    message.reply(queueText);
-}
-
-// Handle status command
-async function handleStatusCommand(message) {
-    const guildId = message.guild.id;
-    const player = riffy ? riffy.players.get(guildId) : null;
-    
-    let statusText = '🤖 **Bot Status:** Online\n';
-    statusText += `🎵 **Music Service:** ${riffy ? 'Initialized' : 'Not initialized'}\n`;
-    
-    if (riffy && riffy.nodes) {
-        const connectedNodes = Array.from(riffy.nodes.values()).filter(n => n.connected);
-        statusText += `🔗 **Lavalink Nodes:** ${connectedNodes.length}/${riffy.nodes.size} connected\n`;
-        
-        if (connectedNodes.length > 0) {
-            statusText += `✅ **Music Ready:** Yes\n`;
-        } else {
-            statusText += `❌ **Music Ready:** No (attempting reconnection...)\n`;
-        }
-        
-        // Show node details
-        statusText += '\n**Node Status:**\n';
-        riffy.nodes.forEach((node, name) => {
-            const status = node.connected ? '🟢 Connected' : '🔴 Disconnected';
-            statusText += `• ${name}: ${status} (${node.host}:${node.port})\n`;
-        });
-    } else {
-        statusText += '❌ **Music Ready:** No (Lavalink not initialized)\n';
-    }
-    
-    if (player) {
-        statusText += `\n🎵 **Current Player:** ${player.playing ? 'Playing' : 'Stopped'}\n`;
-        if (player.currentTrack) {
-            statusText += `🎶 **Now Playing:** ${player.currentTrack.info.title}\n`;
-        }
-    } else {
-        statusText += '\n🎵 **Current Player:** None\n';
-    }
-    
-    statusText += `\n🔄 **Reconnection Attempts:** ${reconnectAttempts}/${maxReconnectAttempts}`;
-    
-    const statusEmbed = new EmbedBuilder()
-        .setTitle('🎵 Bot Status')
-        .setDescription(statusText)
-        .setColor(riffy && riffy.nodes && Array.from(riffy.nodes.values()).some(n => n.connected) ? '#00ff00' : '#ff0000')
-        .setTimestamp();
-    
-    message.reply({ embeds: [statusEmbed] });
-}
-
-// Bot ready event
-client.once('ready', async () => {
-    console.log(`🎵 ${client.user.tag} is online!`);
-    console.log(`🎵 Bot is in ${client.guilds.cache.size} servers`);
-    
-    // Initialize Lavalink after bot is ready
-    const lavalinkInitialized = initializeLavalink();
-    
-    // Wait a bit for Lavalink to connect
-    setTimeout(() => {
-        if (riffy && riffy.nodes && riffy.nodes.size > 0) {
-            const connectedNodes = Array.from(riffy.nodes.values()).filter(n => n.connected);
-            if (connectedNodes.length > 0) {
-                console.log('🎵 Lavalink is ready for music commands!');
-            } else {
-                console.log('🎵 Lavalink nodes initialized but not connected, attempting reconnection...');
-                scheduleReconnection();
-            }
-        } else {
-            console.log('🎵 Lavalink connection in progress...');
-            if (!lavalinkInitialized) {
-                console.log('🎵 Initial Lavalink setup failed, will keep trying...');
-            }
-        }
-    }, 5000);
+    // Wait a moment for Lavalink to initialize
+    setTimeout(checkNodesAndConnect, 3000);
 });
 
-// Message event handler
+// Listen for voice state updates to detect disconnections
+client.on('voiceStateUpdate', async (oldState, newState) => {
+    // Check if it's the bot's voice state that changed
+    if (oldState.member.id !== client.user.id) return;
+    
+    // If bot was in a voice channel and now isn't, schedule reconnect
+    if (oldState.channelId && !newState.channelId) {
+        console.log(`Bot disconnected from voice channel ${oldState.channelId} in guild ${oldState.guild.id}`);
+        scheduleReconnect(oldState.guild.id);
+    }
+});
+
+// Listen for player disconnections
+riffy.on('playerDisconnect', (player) => {
+    console.log(`Player disconnected from guild ${player.guildId}`);
+    scheduleReconnect(player.guildId);
+});
+
 client.on('messageCreate', async (message) => {
-    // Ignore bot messages
-    if (message.author.bot) return;
-    
-    // Check if message starts with prefix
-    if (!message.content.startsWith(PREFIX)) return;
-    
-    const args = message.content.slice(PREFIX.length).trim().split(/ +/);
-    const command = args.shift().toLowerCase();
-    
-    try {
-        switch (command) {
-            case 'play':
-                await handlePlayCommand(message);
-                break;
-            case 'stop':
-                await handleStopCommand(message);
-                break;
-            case 'skip':
-                await handleSkipCommand(message);
-                break;
-            case 'pause':
-                await handlePauseCommand(message);
-                break;
-            case 'queue':
-                await handleQueueCommand(message);
-                break;
-            case 'status':
-                await handleStatusCommand(message);
-                break;
-            case 'help':
-                const helpEmbed = new EmbedBuilder()
-                    .setTitle('🎵 Music Bot Commands')
-                    .setDescription('Here are all the available commands:')
-                    .addFields(
-                        { name: `${PREFIX}play [song/url]`, value: 'Play a song or add to queue', inline: false },
-                        { name: `${PREFIX}stop`, value: 'Stop playback and clear queue', inline: false },
-                        { name: `${PREFIX}skip`, value: 'Skip to next song', inline: false },
-                        { name: `${PREFIX}pause`, value: 'Pause/Resume playback', inline: false },
-                        { name: `${PREFIX}queue`, value: 'Show current queue', inline: false },
-                        { name: `${PREFIX}status`, value: 'Check bot and music service status', inline: false },
-                        { name: `${PREFIX}help`, value: 'Show this help message', inline: false }
-                    )
-                    .setColor('#00ff00')
-                    .setTimestamp();
-                
-                message.reply({ embeds: [helpEmbed] });
-                break;
-            default:
-                message.reply(`❌ Unknown command! Use \`${PREFIX}help\` to see available commands.`);
+    if (message.author.bot || !message.guild) return;
+
+    const guildId = message.guild.id;
+    const configuredChannelId = guildChannelConfig.get(guildId);
+
+    if (message.content === '!set_panda') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageGuild)) {
+            return message.reply('You need Manage Server permission to set the music channel.').then((msg) => {
+                setTimeout(() => msg.delete().catch(() => null), 5000);
+            }).catch(() => null);
         }
-    } catch (error) {
-        console.error('Command error:', error);
-        message.reply('❌ An error occurred while executing the command!');
+
+        guildChannelConfig.set(guildId, message.channel.id);
+        message.reply('This channel is now the official music channel. Type song names or links without a prefix.').then((msg) => {
+            setTimeout(() => msg.delete().catch(() => null), 5000);
+        }).catch(() => null);
+        setTimeout(() => {
+            message.delete().catch(() => null);
+        }, 5000);
+        return;
+    }
+
+    const isOfficialChannel = configuredChannelId && message.channel.id === configuredChannelId;
+    const isPlayCommand = message.content.startsWith('!play ');
+
+    if (message.content === '!247') {
+        if (!message.member.voice.channelId) {
+            return message.reply('You must be in a voice channel to enable 24/7 mode.').then((msg) => {
+                setTimeout(() => msg.delete().catch(() => null), 5000);
+            }).catch(() => null);
+        }
+        const player = riffy.createConnection({
+            guildId: guildId,
+            voiceChannel: message.member.voice.channelId,
+            textChannel: message.channel.id,
+            deaf: true
+        });
+        stayConnectedGuilds.set(guildId, true);
+        message.reply('24/7 mode enabled. I will stay in this voice channel.').then((msg) => {
+            setTimeout(() => msg.delete().catch(() => null), 5000);
+        }).catch(() => null);
+        setTimeout(() => {
+            message.delete().catch(() => null);
+        }, 5000);
+        await updateMusicPanel(player);
+        return;
+    }
+
+    if (isPlayCommand || isOfficialChannel) {
+        const query = isPlayCommand ? message.content.slice(6).trim() : message.content.trim();
+        if (!query) {
+            if (isOfficialChannel) {
+                setTimeout(() => message.delete().catch(() => null), 5000);
+            }
+            return message.reply('Please provide a song to play.').then((msg) => {
+                setTimeout(() => msg.delete().catch(() => null), 5000);
+            }).catch(() => null);
+        }
+        const guildId = message.guild.id;
+        if (processing.get(guildId)) {
+            return message.reply('Already processing a play command, please wait.');
+        }
+
+        processing.set(guildId, true);
+
+        try {
+            if (!message.member.voice.channelId) {
+                processing.delete(guildId);
+                return message.reply('You must be in a voice channel to play music.');
+            }
+
+            // Check if Lavalink nodes are available
+            const nodes = riffy.nodes.map(n => n);
+            const hasAvailableNode = nodes.length > 0 && nodes.some(node => node.connected);
+            if (!hasAvailableNode) {
+                processing.delete(guildId);
+                return message.reply('Lavalink nodes are not available yet. Please wait a moment and try again.');
+            }
+
+            const isUrl = query.startsWith('http') || query.startsWith('https');
+            const resolveOptions = { query: query, requester: message.author };
+            // For URLs, Lavalink loads directly without source
+
+            const res = await riffy.resolve(resolveOptions);
+            console.log(`Search result: ${res.loadType}`);
+            console.log(`Tracks found: ${res.tracks.length}`);
+            for (let i = 0; i < Math.min(5, res.tracks.length); i++) {
+                console.log(`Track ${i}: ${res.tracks[i].info.title}`);
+            }
+
+            if (res.loadType === 'error') {
+                processing.delete(guildId);
+                return message.reply('An error occurred while searching.');
+            }
+            if (res.loadType === 'empty') {
+                processing.delete(guildId);
+                return message.reply('No results found.');
+            }
+
+            const player = riffy.createConnection({
+                guildId: message.guild.id,
+                voiceChannel: message.member.voice.channelId,
+                textChannel: message.channel.id,
+                deaf: true
+            });
+            if (!isPlayCommand && !stayConnectedGuilds.get(guildId)) {
+                stayConnectedGuilds.set(guildId, false);
+            }
+
+            player.queue.add(res.tracks[0]);
+            const replyMessage = await message.reply(`Added to queue: **${res.tracks[0].info.title}**`);
+            console.log(`Added to queue: ${res.tracks[0].info.title}`);
+            await updateMusicPanel(player);
+            setTimeout(() => {
+                message.delete().catch(() => null);
+            }, 5000);
+            if (replyMessage) {
+                setTimeout(() => {
+                    replyMessage.delete().catch(() => null);
+                }, 5000);
+            }
+
+            if (!player.playing) {
+                player.play();
+                console.log('Started playing');
+                await updateMusicPanel(player);
+            }
+
+            processing.delete(guildId);
+        } catch (error) {
+            console.error('Play command error:', error);
+            message.reply('An error occurred while playing music.');
+            processing.delete(guildId);
+        }
     }
 });
 
-// Error handling
-client.on('error', console.error);
-process.on('unhandledRejection', console.error);
-
-// Login to Discord
-const token = process.env.DISCORD_TOKEN;
-if (!token) {
-    console.error('❌ DISCORD_TOKEN not found in environment variables!');
-    console.error('Please create a .env file with your bot token.');
+if (!TOKEN) {
+    console.error('BOT_TOKEN is not set.');
     process.exit(1);
 }
 
-client.login(token).catch(console.error);
+if (!lavalinkConfig.host || !lavalinkConfig.password) {
+    console.error('Lavalink configuration is incomplete. Please set LAVALINK_HOST, LAVALINK_PORT, LAVALINK_PASSWORD.');
+    process.exit(1);
+}
+
+client.login(TOKEN);
+
+const port = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Bot is running');
+}).listen(port, () => {
+    console.log(`HTTP server listening on port ${port}`);
+});
